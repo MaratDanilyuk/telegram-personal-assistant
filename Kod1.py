@@ -10,9 +10,14 @@ import asyncio
 import re
 import json
 import aiohttp
+import os
 
-TOKEN = "8290463822:AAFTrLhXf3PmvLN7ZEom4X80Onk_fHHx-zM"
-WEATHER_API_KEY = "806524453c5269ec6316eb29ddcb568b"   # твой ключ
+# Читаем токены из переменных окружения (безопасно!)
+TOKEN = os.getenv("TOKEN")
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
+
+#TOKEN = "8290463822:AAFTrLhXf3PmvLN7ZEom4X80Onk_fHHx-zM"
+#WEATHER_API_KEY = "806524453c5269ec6316eb29ddcb568b"   # твой ключ
 
 # Хранение состояний
 storage = MemoryStorage()
