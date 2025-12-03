@@ -1,7 +1,7 @@
 from pathlib import Path
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram import F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,13 +23,15 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 bot = Bot(token=TOKEN)
 
+
 # ───── Отдельные состояния для каждой функции ─────
 class Form(StatesGroup):
-    waiting_for_reminder = State()   # напоминания
-    waiting_for_note     = State()   # заметки
-    waiting_for_city     = State()   # погода
+    waiting_for_reminder = State()  # напоминания
+    waiting_for_note = State()  # заметки
+    waiting_for_city = State()  # погода
 
-# ───── ГЛАВНОЕ МЕНЮ (сразу показываем при старте) ─────
+
+# ───── ГЛАВНОЕ МЕНЮ ─────
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Напомни позже"), KeyboardButton(text="Заметки")],
@@ -39,7 +41,8 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ───── ПРИВЕТСТВИЕ СРАЗУ С МЕНЮ (без кнопки "Запустить бота") ─────
+
+# ───── ПРИВЕТСТВИЕ ─────
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
@@ -48,23 +51,30 @@ async def cmd_start(message: Message):
         reply_markup=main_keyboard
     )
 
-# ───── УМНЫЕ НАПОМИНАНИЯ: минуты + часы + дни ─────
+
+# ───── УМНЫЕ НАПОМИНАНИЯ ─────
 async def schedule_reminder(text: str, minutes: int, user_id: int):
     await asyncio.sleep(minutes * 60)
-    await bot.send_message(user_id, f"Напоминание!\n{text}")
+    # При отправке напоминания тоже прикрепим кнопки, чтобы они были под рукой
+    try:
+        await bot.send_message(user_id, f"⏰ Напоминание!\n{text}", reply_markup=main_keyboard)
+    except:
+        pass
+
 
 @dp.message(F.text == "Напомни позже")
 async def remind_later_start(message: Message, state: FSMContext):
+    # Тут убираем кнопки, чтобы удобнее было писать текст
     await message.answer(
         "Напиши, что напомнить и через сколько\n\n"
         "Примеры:\n"
         "• Позвонить маме через 2 часа\n"
         "• Сходить в магазин через 3 дня\n"
-        "• Выпить воду через 45 минут\n"
-        "• Встреча через 1 день 5 часов",
-        reply_markup=types.ReplyKeyboardRemove()
+        "• Выпить воду через 45 минут",
+        reply_markup=ReplyKeyboardRemove()
     )
     await state.set_state(Form.waiting_for_reminder)
+
 
 @dp.message(Form.waiting_for_reminder)
 async def reminder_received(message: Message, state: FSMContext):
@@ -93,12 +103,18 @@ async def reminder_received(message: Message, state: FSMContext):
                         break
         i += 1
 
+    # Если не понял время — возвращаем кнопки, чтобы не застрять
     if minutes_total == 0:
-        await message.answer("Не понял время\nПримеры: через 10 минут / 2 часа / 1 день")
+        await message.answer(
+            "Не понял время 🤷‍♂️\nПопробуй заново: выбери «Напомни позже» в меню.",
+            reply_markup=main_keyboard
+        )
+        await state.clear()
         return
 
     if minutes_total > 43200:  # 30 дней
-        await message.answer("Слишком далеко — максимум 30 дней")
+        await message.answer("Слишком далеко — максимум 30 дней", reply_markup=main_keyboard)
+        await state.clear()
         return
 
     # Красивое подтверждение
@@ -115,17 +131,27 @@ async def reminder_received(message: Message, state: FSMContext):
     asyncio.create_task(schedule_reminder(original_text, minutes_total, message.from_user.id))
     await state.clear()
 
-# ───── Заметки (с сохранением в файл) ─────
-NOTES_FILE = Path("notes.json")
-if NOTES_FILE.exists():
-    with open(NOTES_FILE, "r", encoding="utf-8") as f:
-        user_notes = json.load(f)
-else:
-    user_notes = {}
 
-def save_notes():
+# ───── ЗАМЕТКИ ─────
+NOTES_FILE = Path("notes.json")
+# При старте пробуем создать пустой файл, если его нет
+if not NOTES_FILE.exists():
     with open(NOTES_FILE, "w", encoding="utf-8") as f:
-        json.dump(user_notes, f, ensure_ascii=False, indent=2)
+        json.dump({}, f)
+
+
+def load_notes():
+    try:
+        with open(NOTES_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+
+def save_notes_to_file(notes_data):
+    with open(NOTES_FILE, "w", encoding="utf-8") as f:
+        json.dump(notes_data, f, ensure_ascii=False, indent=2)
+
 
 @dp.message(F.text == "Заметки")
 async def show_notes_menu(message: Message):
@@ -139,41 +165,52 @@ async def show_notes_menu(message: Message):
     )
     await message.answer("Что сделать с заметками?", reply_markup=keyboard)
 
+
 @dp.message(F.text == "Добавить заметку")
 async def add_note_start(message: Message, state: FSMContext):
-    await message.answer("Напиши заметку — сохраню навсегда", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("Напиши заметку — сохраню навсегда", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.waiting_for_note)
+
 
 @dp.message(Form.waiting_for_note)
 async def save_note(message: Message, state: FSMContext):
     text = message.text.strip()
     user_id = str(message.from_user.id)
+
+    user_notes = load_notes()
     if user_id not in user_notes:
         user_notes[user_id] = []
     user_notes[user_id].append(text)
-    save_notes()
-    await message.answer(f"Заметка сохранена!\n\n«{text}»", reply_markup=main_keyboard)
+    save_notes_to_file(user_notes)
+
+    await message.answer(f"✅ Заметка сохранена!\n\n«{text}»", reply_markup=main_keyboard)
     await state.clear()
+
 
 @dp.message(F.text == "Мои заметки")
 async def show_my_notes(message: Message):
     user_id = str(message.from_user.id)
+    user_notes = load_notes()
     notes_list = user_notes.get(user_id, [])
+
     if not notes_list:
         await message.answer("У тебя пока нет заметок\nДобавь первую!", reply_markup=main_keyboard)
     else:
         text = "Твои заметки:\n\n" + "\n".join(f"{i}. {note}" for i, note in enumerate(notes_list, 1))
         await message.answer(text, reply_markup=main_keyboard)
 
+
 @dp.message(F.text == "Назад в меню")
 async def back_to_main(message: Message):
     await message.answer("Главное меню:", reply_markup=main_keyboard)
 
-# ───── Погода ─────
+
+# ───── ПОГОДА ─────
 @dp.message(F.text == "Погода")
 async def weather_start(message: Message, state: FSMContext):
-    await message.answer("Напиши название города")
+    await message.answer("Напиши название города", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.waiting_for_city)
+
 
 @dp.message(Form.waiting_for_city)
 async def get_weather(message: Message, state: FSMContext):
@@ -185,12 +222,13 @@ async def get_weather(message: Message, state: FSMContext):
                 data = await resp.json()
                 temp = data["main"]["temp"]
                 desc = data["weather"][0]["description"].capitalize()
-                await message.answer(f"Погода в {city}:\n{desc}, {temp}°C", reply_markup=main_keyboard)
+                await message.answer(f"🌤 Погода в {city}:\n{desc}, {temp}°C", reply_markup=main_keyboard)
             else:
-                await message.answer("Город не найден\nПопробуй ещё раз")
+                await message.answer("Город не найден 😔\nПопробуй ещё раз через меню.", reply_markup=main_keyboard)
     await state.clear()
 
-# ───── Курсы валют ─────
+
+# ───── КУРСЫ ВАЛЮТ ─────
 @dp.message(F.text == "Курсы валют")
 async def real_rates(message: Message):
     url = "https://www.cbr-xml-daily.ru/daily_json.js"
@@ -203,34 +241,57 @@ async def real_rates(message: Message):
                 eur = data["Valute"]["EUR"]["Value"]
                 cny = data["Valute"]["CNY"]["Value"]
                 await message.answer(
-                    f"Курсы ЦБ РФ на сегодня:\n\n"
-                    f"USD → {usd:.2f} ₽\n"
-                    f"EUR → {eur:.2f} ₽\n"
-                    f"CNY → {cny:.2f} ₽"
+                    f"💱 Курсы ЦБ РФ на сегодня:\n\n"
+                    f"🇺🇸 USD → {usd:.2f} ₽\n"
+                    f"🇪🇺 EUR → {eur:.2f} ₽\n"
+                    f"🇨🇳 CNY → {cny:.2f} ₽",
+                    reply_markup=main_keyboard
                 )
             else:
-                await message.answer("Не смог получить курсы")
+                await message.answer("Не смог получить курсы", reply_markup=main_keyboard)
 
-# ───── Остальные кнопки ─────
+
+# ───── СЛУЧАЙНАЯ ИДЕЯ ─────
 @dp.message(F.text == "Случайная идея")
 async def idea(message: Message):
-    ideas = ["Сделай 10 отжиманий", "Выпей стакан воды", "Позвони другу", "Улыбнись в зеркало", "Сделай глубокий вдох"]
+    ideas = [
+        "Сделай 10 отжиманий 💪",
+        "Выпей стакан воды 💧",
+        "Позвони другу 📞",
+        "Улыбнись в зеркало 😊",
+        "Сделай глубокий вдох 🧘‍♂️",
+        "Почитай книгу 15 минут 📖"
+    ]
     import random
-    await message.answer(random.choice(ideas))
+    await message.answer(random.choice(ideas), reply_markup=main_keyboard)
 
+
+# ───── ПОМОЩЬ ─────
 @dp.message(F.text == "Помощь")
 async def help_cmd(message: Message):
-    await message.answer("Я умею:\n• Напоминания (мин/ч/дни)\n• Заметки\n• Погода\n• Курсы валют\n• Случайные идеи")
+    await message.answer(
+        "Я умею:\n"
+        "• Напоминания (мин/ч/дни)\n"
+        "• Заметки (сохраняю)\n"
+        "• Погода\n"
+        "• Курсы валют\n"
+        "• Случайные идеи",
+        reply_markup=main_keyboard
+    )
 
-# ───── Эхо ─────
+
+# ───── ОБРАБОТКА ВСЕГО ОСТАЛЬНОГО ─────
 @dp.message()
 async def echo(message: Message):
-    await message.answer("Не понял команды\nВыбери кнопку из меню")
+    # Если юзер написал что-то непонятное, возвращаем ему меню
+    await message.answer("Я не понял команду 🤖\nВыбери действие из меню:", reply_markup=main_keyboard)
 
-# ───── Запуск ─────
+
+# ───── ЗАПУСК ─────
 async def main():
     print("Бот запущен и готов к работе!")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
