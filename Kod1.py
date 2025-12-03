@@ -7,7 +7,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import asyncio
-import re
 import json
 import aiohttp
 import os
@@ -15,6 +14,9 @@ import os
 # Читаем токены из переменных окружения (безопасно!)
 TOKEN = os.getenv("TOKEN")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
+
+if not TOKEN or not WEATHER_API_KEY:
+    raise RuntimeError("Установите переменные окружения TOKEN и WEATHER_API_KEY!")
 
 # Хранение состояний
 storage = MemoryStorage()
@@ -27,10 +29,7 @@ class Form(StatesGroup):
     waiting_for_note     = State()   # заметки
     waiting_for_city     = State()   # погода
 
-# ───── Клавиатуры ─────
-start_button = KeyboardButton(text="Запустить бота")
-request_start = ReplyKeyboardMarkup(keyboard=[[start_button]], resize_keyboard=True, one_time_keyboard=True)
-
+# ───── ГЛАВНОЕ МЕНЮ (сразу показываем при старте) ─────
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Напомни позже"), KeyboardButton(text="Заметки")],
@@ -40,42 +39,80 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ───── Запуск бота ─────
+# ───── ПРИВЕТСТВИЕ СРАЗУ С МЕНЮ (без кнопки "Запустить бота") ─────
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("Привет! Я твой личный ассистент\nНажми кнопку ниже, чтобы начать:", reply_markup=request_start)
+    await message.answer(
+        "Привет! Я твой личный ассистент\n"
+        "Чем помочь сегодня?",
+        reply_markup=main_keyboard
+    )
 
-@dp.message(F.text == "Запустить бота")
-async def real_start(message: Message):
-    await message.answer("Готово! Теперь я твой помощник 24/7\nЧем помочь?", reply_markup=main_keyboard)
-
-# ───── Напоминания ─────
+# ───── УМНЫЕ НАПОМИНАНИЯ: минуты + часы + дни ─────
 async def schedule_reminder(text: str, minutes: int, user_id: int):
     await asyncio.sleep(minutes * 60)
     await bot.send_message(user_id, f"Напоминание!\n{text}")
 
 @dp.message(F.text == "Напомни позже")
 async def remind_later_start(message: Message, state: FSMContext):
-    await message.answer("Напиши, что напомнить и через сколько минут\nПример: «Позвонить маме через 15»",
-                         reply_markup=types.ReplyKeyboardRemove())
+    await message.answer(
+        "Напиши, что напомнить и через сколько\n\n"
+        "Примеры:\n"
+        "• Позвонить маме через 2 часа\n"
+        "• Сходить в магазин через 3 дня\n"
+        "• Выпить воду через 45 минут\n"
+        "• Встреча через 1 день 5 часов",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
     await state.set_state(Form.waiting_for_reminder)
 
 @dp.message(Form.waiting_for_reminder)
 async def reminder_received(message: Message, state: FSMContext):
-    text = message.text.strip()
-    numbers = re.findall(r'\d+', text)
+    original_text = message.text.strip()
+    text = original_text.lower()
 
-    if not numbers:
-        await message.answer("Не нашёл число минут\nПопробуй ещё раз:")
+    minutes_total = 0
+    units = {
+        'минут': 1, 'минуты': 1, 'минуту': 1, 'минута': 1, 'мин': 1, 'м': 1,
+        'час': 60, 'часа': 60, 'часов': 60, 'ч': 60,
+        'день': 1440, 'дня': 1440, 'дней': 1440, 'д': 1440
+    }
+
+    words = text.split()
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word.isdigit():
+            num = int(word)
+            if i + 1 < len(words):
+                next_word = words[i + 1]
+                for unit, multiplier in units.items():
+                    if next_word.startswith(unit):
+                        minutes_total += num * multiplier
+                        i += 1
+                        break
+        i += 1
+
+    if minutes_total == 0:
+        await message.answer("Не понял время\nПримеры: через 10 минут / 2 часа / 1 день")
         return
 
-    minutes = int(numbers[-1])
-    if minutes < 1 or minutes > 1440:
-        await message.answer("Укажи от 1 до 1440 минут")
+    if minutes_total > 43200:  # 30 дней
+        await message.answer("Слишком далеко — максимум 30 дней")
         return
 
-    await message.answer(f"Хорошо! Напомню через {minutes} минут", reply_markup=main_keyboard)
-    asyncio.create_task(schedule_reminder(text, minutes, message.from_user.id))
+    # Красивое подтверждение
+    days = minutes_total // 1440
+    hours = (minutes_total % 1440) // 60
+    mins = minutes_total % 60
+    parts = []
+    if days: parts.append(f"{days} дн.")
+    if hours: parts.append(f"{hours} ч.")
+    if mins: parts.append(f"{mins} мин.")
+    time_str = " ".join(parts) if parts else "чуть позже"
+
+    await message.answer(f"Хорошо! Напомню через {time_str}", reply_markup=main_keyboard)
+    asyncio.create_task(schedule_reminder(original_text, minutes_total, message.from_user.id))
     await state.clear()
 
 # ───── Заметки (с сохранением в файл) ─────
@@ -153,19 +190,18 @@ async def get_weather(message: Message, state: FSMContext):
                 await message.answer("Город не найден\nПопробуй ещё раз")
     await state.clear()
 
+# ───── Курсы валют ─────
 @dp.message(F.text == "Курсы валют")
 async def real_rates(message: Message):
     url = "https://www.cbr-xml-daily.ru/daily_json.js"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status == 200:
-                # ←←←←← ВОТ ЭТА СТРОЧКА ЧИНИТ ВСЁ
                 raw_text = await resp.text()
                 data = json.loads(raw_text)
-                # →→→→→
                 usd = data["Valute"]["USD"]["Value"]
                 eur = data["Valute"]["EUR"]["Value"]
-                cny = data["Valute"]["CNY"]["Value"]  # добавил юань — красиво же
+                cny = data["Valute"]["CNY"]["Value"]
                 await message.answer(
                     f"Курсы ЦБ РФ на сегодня:\n\n"
                     f"USD → {usd:.2f} ₽\n"
@@ -184,7 +220,7 @@ async def idea(message: Message):
 
 @dp.message(F.text == "Помощь")
 async def help_cmd(message: Message):
-    await message.answer("Я умею:\n• Напоминания\n• Заметки (сохраняются навсегда)\n• Погода\n• Курсы валют\n• Случайные идеи")
+    await message.answer("Я умею:\n• Напоминания (мин/ч/дни)\n• Заметки\n• Погода\n• Курсы валют\n• Случайные идеи")
 
 # ───── Эхо ─────
 @dp.message()
