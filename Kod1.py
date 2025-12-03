@@ -29,11 +29,13 @@ class Form(StatesGroup):
     waiting_for_reminder = State()  # напоминания
     waiting_for_note = State()  # заметки
     waiting_for_city = State()  # погода
+    waiting_for_ai = State()  # нейросеть
 
 
 # ───── ГЛАВНОЕ МЕНЮ ─────
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
+        [KeyboardButton(text="🧠 AI Помощник")],  # Новая кнопка в самом верху
         [KeyboardButton(text="Напомни позже"), KeyboardButton(text="Заметки")],
         [KeyboardButton(text="Погода"), KeyboardButton(text="Курсы валют")],
         [KeyboardButton(text="Случайная идея"), KeyboardButton(text="Помощь")]
@@ -52,10 +54,67 @@ async def cmd_start(message: Message):
     )
 
 
+# ───── НЕЙРОСЕТЬ (AI) ─────
+@dp.message(F.text == "🧠 AI Помощник")
+async def ai_start(message: Message, state: FSMContext):
+    # Специальная клавиатура для выхода из режима AI
+    ai_keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Назад в меню")]],
+        resize_keyboard=True
+    )
+    await message.answer(
+        "Я переключился в режим нейросети (GPT) 🤖\n\n"
+        "Спрашивай о чем угодно! Я могу писать тексты, объяснять темы, переводить или просто болтать.\n\n"
+        "Чтобы выйти, нажми кнопку внизу.",
+        reply_markup=ai_keyboard
+    )
+    await state.set_state(Form.waiting_for_ai)
+
+
+@dp.message(Form.waiting_for_ai)
+async def ai_chat(message: Message, state: FSMContext):
+    # Если нажали кнопку выхода
+    if message.text == "Назад в меню":
+        await message.answer("Выхожу из режима AI. Чем еще помочь?", reply_markup=main_keyboard)
+        await state.clear()
+        return
+
+    # Показываем статус "печатает...", чтобы юзер видел, что бот думает
+    await bot.send_chat_action(message.chat.id, "typing")
+
+    user_text = message.text
+    # Используем бесплатный API Pollinations.ai
+    url = "https://text.pollinations.ai/"
+
+    # Формируем запрос
+    payload = {
+        "messages": [
+            {"role": "system", "content": "Ты полезный и вежливый ассистент. Отвечай на русском языке."},
+            {"role": "user", "content": user_text}
+        ],
+        "model": "openai"  # Использует GPT-4o-mini или аналог
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    answer = await resp.text()
+                    # Отправляем ответ и оставляем клавиатуру "Назад", чтобы продолжить общение
+                    ai_keyboard = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Назад в меню")]],
+                                                      resize_keyboard=True)
+                    await message.answer(answer, reply_markup=ai_keyboard)
+                else:
+                    await message.answer("Упс, нейросеть сейчас перегружена. Попробуй позже.")
+    except Exception as e:
+        await message.answer(f"Ошибка соединения: {e}")
+
+    # Важно: мы НЕ делаем state.clear(), чтобы пользователь мог писать дальше
+
+
 # ───── УМНЫЕ НАПОМИНАНИЯ ─────
 async def schedule_reminder(text: str, minutes: int, user_id: int):
     await asyncio.sleep(minutes * 60)
-    # При отправке напоминания тоже прикрепим кнопки, чтобы они были под рукой
     try:
         await bot.send_message(user_id, f"⏰ Напоминание!\n{text}", reply_markup=main_keyboard)
     except:
@@ -64,7 +123,6 @@ async def schedule_reminder(text: str, minutes: int, user_id: int):
 
 @dp.message(F.text == "Напомни позже")
 async def remind_later_start(message: Message, state: FSMContext):
-    # Тут убираем кнопки, чтобы удобнее было писать текст
     await message.answer(
         "Напиши, что напомнить и через сколько\n\n"
         "Примеры:\n"
@@ -103,7 +161,6 @@ async def reminder_received(message: Message, state: FSMContext):
                         break
         i += 1
 
-    # Если не понял время — возвращаем кнопки, чтобы не застрять
     if minutes_total == 0:
         await message.answer(
             "Не понял время 🤷‍♂️\nПопробуй заново: выбери «Напомни позже» в меню.",
@@ -117,7 +174,6 @@ async def reminder_received(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    # Красивое подтверждение
     days = minutes_total // 1440
     hours = (minutes_total % 1440) // 60
     mins = minutes_total % 60
@@ -134,7 +190,6 @@ async def reminder_received(message: Message, state: FSMContext):
 
 # ───── ЗАМЕТКИ ─────
 NOTES_FILE = Path("notes.json")
-# При старте пробуем создать пустой файл, если его нет
 if not NOTES_FILE.exists():
     with open(NOTES_FILE, "w", encoding="utf-8") as f:
         json.dump({}, f)
@@ -271,6 +326,7 @@ async def idea(message: Message):
 async def help_cmd(message: Message):
     await message.answer(
         "Я умею:\n"
+        "• 🧠 AI Помощник (чат с GPT)\n"
         "• Напоминания (мин/ч/дни)\n"
         "• Заметки (сохраняю)\n"
         "• Погода\n"
@@ -286,12 +342,13 @@ async def echo(message: Message):
     # Если юзер написал что-то непонятное, возвращаем ему меню
     await message.answer("Я не понял команду 🤖\nВыбери действие из меню:", reply_markup=main_keyboard)
 
-
 # ───── ЗАПУСК ─────
 async def main():
     print("Бот запущен и готов к работе!")
     await dp.start_polling(bot)
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Бот выключен вручную.")
