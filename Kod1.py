@@ -1,26 +1,23 @@
-from pathlib import Path
+import asyncio, json, aiohttp, os, wikipedia, aiosqlite
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-import asyncio, json, aiohttp, os, wikipedia, random
 
 # Настройки
 wikipedia.set_lang("ru")
 TOKEN = os.getenv("TOKEN")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
+DB_NAME = "bot_database.db"
 
-if not TOKEN or not WEATHER_API_KEY:
-    raise RuntimeError("Нет переменных окружения!")
+if not TOKEN or not WEATHER_API_KEY: raise RuntimeError("Нет переменных окружения!")
 
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher(storage=MemoryStorage())
 bot = Bot(token=TOKEN)
 
 
-# Состояния
 class Form(StatesGroup):
     waiting_for_reminder = State()
     waiting_for_note = State()
@@ -31,19 +28,32 @@ class Form(StatesGroup):
 
 # Клавиатуры
 main_kb = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="🧠 AI Помощник")],
-    [KeyboardButton(text="🔍 Википедия"), KeyboardButton(text="🌤 Погода")],
-    [KeyboardButton(text="⏰ Напомни позже"), KeyboardButton(text="📝 Заметки")],
-    [KeyboardButton(text="💱 Курсы валют")]
+    [KeyboardButton(text="🧠 AI Помощник"), KeyboardButton(text="🔍 Википедия")],
+    [KeyboardButton(text="🌤 Погода"), KeyboardButton(text="💱 Курсы валют")],
+    [KeyboardButton(text="⏰ Напомни позже"), KeyboardButton(text="📝 Заметки")]
 ], resize_keyboard=True)
 
 back_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Назад в меню")]], resize_keyboard=True)
 
 
-# ───── СТАРТ ─────
+# ───── РАБОТА С БД ─────
+async def db_exec(sql, params=()):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(sql, params)
+        await db.commit()
+
+
+async def db_fetch(sql, params=()):
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(sql, params) as c:
+            return [r[0] for r in await c.fetchall()]
+
+
+# ───── ОБЩИЕ ФУНКЦИИ ─────
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer("Привет! Я твой ассистент. Чем помочь?", reply_markup=main_kb)
+    await db_exec("CREATE TABLE IF NOT EXISTS notes (user_id INTEGER, text TEXT)")
+    await message.answer("Привет! Я твой цифровой ассистент. Чем помочь?", reply_markup=main_kb)
 
 
 @dp.message(F.text == "Назад в меню")
@@ -55,25 +65,20 @@ async def back_to_main(message: Message, state: FSMContext):
 # ───── НЕЙРОСЕТЬ ─────
 @dp.message(F.text == "🧠 AI Помощник")
 async def ai_start(message: Message, state: FSMContext):
-    await message.answer("🤖 Режим AI (GPT). Спрашивай!\nВыход — кнопка внизу.", reply_markup=back_kb)
+    await message.answer("🤖 Режим GPT. Спрашивай!\nВыход — кнопка внизу.", reply_markup=back_kb)
     await state.set_state(Form.waiting_for_ai)
 
 
 @dp.message(Form.waiting_for_ai)
 async def ai_chat(message: Message):
     await bot.send_chat_action(message.chat.id, "typing")
-    payload = {
-        "messages": [{"role": "system", "content": "Ты полезный ассистент. Отвечай кратко на русском."},
-                     {"role": "user", "content": message.text}],
-        "model": "openai"
-    }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://text.pollinations.ai/", json=payload) as resp:
-                if resp.status == 200:
-                    await message.answer(await resp.text(), reply_markup=back_kb)
-                else:
-                    await message.answer("Ошибка сервера AI.", reply_markup=back_kb)
+        async with aiohttp.ClientSession() as sess:
+            payload = {"messages": [{"role": "system", "content": "Ты умный ассистент. Отвечай на русском."},
+                                    {"role": "user", "content": message.text}], "model": "openai"}
+            async with sess.post("https://text.pollinations.ai/", json=payload) as resp:
+                await message.answer(await resp.text() if resp.status == 200 else "Ошибка сервера.",
+                                     reply_markup=back_kb)
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
@@ -81,7 +86,7 @@ async def ai_chat(message: Message):
 # ───── ВИКИПЕДИЯ ─────
 @dp.message(F.text == "🔍 Википедия")
 async def wiki_start(message: Message, state: FSMContext):
-    await message.answer("Напиши слово для поиска:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Введите слово для поиска:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.waiting_for_wiki)
 
 
@@ -91,12 +96,10 @@ async def wiki_search(message: Message, state: FSMContext):
     try:
         res = wikipedia.summary(message.text.strip(), sentences=4)
         url = wikipedia.page(message.text.strip(), auto_suggest=False).url
-        await message.answer(f"📖 <b>{message.text}</b>\n\n{res}\n\n🔗 <a href='{url}'>Читать</a>",
+        await message.answer(f"📖 <b>{message.text}</b>\n\n{res}\n\n🔗 <a href='{url}'>Читать статью</a>",
                              parse_mode="HTML", reply_markup=main_kb)
-    except wikipedia.exceptions.DisambiguationError as e:
-        await message.answer(f"⚠️ Много значений: {', '.join(e.options[:5])}", reply_markup=main_kb)
     except Exception:
-        await message.answer("Ничего не найдено.", reply_markup=main_kb)
+        await message.answer("Ничего не найдено или слишком много значений.", reply_markup=main_kb)
     await state.clear()
 
 
@@ -119,7 +122,6 @@ async def remind_start(message: Message, state: FSMContext):
 @dp.message(Form.waiting_for_reminder)
 async def remind_parse(message: Message, state: FSMContext):
     text, total_mins = message.text.lower(), 0
-    # Сокращенный словарь (startswith покроет 'минуты', 'часов' и т.д.)
     units = {'мин': 1, 'м': 1, 'час': 60, 'ч': 60, 'ден': 1440, 'дн': 1440}
     words = text.split()
 
@@ -128,61 +130,48 @@ async def remind_parse(message: Message, state: FSMContext):
             key = next((k for k in units if words[i + 1].startswith(k)), None)
             if key: total_mins += int(word) * units[key]
 
-    if total_mins == 0 or total_mins > 43200:
-        await message.answer("Не понял время или > 30 дней. Попробуй еще раз.", reply_markup=main_kb)
-    else:
+    if 0 < total_mins <= 43200:
         d, h, m = total_mins // 1440, (total_mins % 1440) // 60, total_mins % 60
         t_str = f"{d}д {h}ч {m}м" if d else f"{h}ч {m}м" if h else f"{m} мин"
         await message.answer(f"✅ Таймер на {t_str}", reply_markup=main_kb)
         asyncio.create_task(schedule_reminder(message.text, total_mins, message.from_user.id))
+    else:
+        await message.answer("Не понял время или срок > 30 дней.", reply_markup=main_kb)
     await state.clear()
 
 
 # ───── ЗАМЕТКИ ─────
-NOTES_FILE = Path("notes.json")
-if not NOTES_FILE.exists(): json.dump({}, open(NOTES_FILE, "w", encoding="utf-8"))
-
-
-def manage_notes(data=None):
-    if data is None:  # Load
-        return json.load(open(NOTES_FILE, "r", encoding="utf-8"))
-    json.dump(data, open(NOTES_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-
-
 @dp.message(F.text == "📝 Заметки")
 async def notes_menu(message: Message):
-    kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="Добавить заметку"), KeyboardButton(text="Мои заметки")],
-        [KeyboardButton(text="Назад в меню")]], resize_keyboard=True)
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Добавить заметку"), KeyboardButton(text="Мои заметки")],
+                                       [KeyboardButton(text="Назад в меню")]], resize_keyboard=True)
     await message.answer("Меню заметок:", reply_markup=kb)
 
 
 @dp.message(F.text == "Добавить заметку")
 async def add_note(message: Message, state: FSMContext):
-    await message.answer("Пиши текст:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Введите текст заметки:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.waiting_for_note)
 
 
 @dp.message(Form.waiting_for_note)
 async def save_note(message: Message, state: FSMContext):
-    data, uid = manage_notes(), str(message.from_user.id)
-    data.setdefault(uid, []).append(message.text)
-    manage_notes(data)
+    await db_exec("INSERT INTO notes (user_id, text) VALUES (?, ?)", (message.from_user.id, message.text))
     await message.answer("✅ Сохранено!", reply_markup=main_kb)
     await state.clear()
 
 
 @dp.message(F.text == "Мои заметки")
 async def list_notes(message: Message):
-    notes = manage_notes().get(str(message.from_user.id), [])
-    text = "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes)) if notes else "Пусто."
+    notes = await db_fetch("SELECT text FROM notes WHERE user_id = ?", (message.from_user.id,))
+    text = "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes)) if notes else "Список пуст."
     await message.answer(f"📋 Твои заметки:\n\n{text}", reply_markup=main_kb)
 
 
-# ───── ПОГОДА И ВАЛЮТА ─────
+# ───── ПОГОДА ─────
 @dp.message(F.text == "🌤 Погода")
 async def weather_start(message: Message, state: FSMContext):
-    await message.answer("Город?", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Введите город:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.waiting_for_city)
 
 
@@ -194,13 +183,15 @@ async def get_weather(message: Message, state: FSMContext):
         async with sess.get(url) as resp:
             if resp.status == 200:
                 d = await resp.json()
-                await message.answer(f"🌤 {city}: {d['weather'][0]['description']}, {d['main']['temp']}°C",
-                                     reply_markup=main_kb)
+                text = (f"🌤 <b>{city}</b>\n🌡 Температура: {round(d['main']['temp'])}°C\n"
+                        f"🥶 Ощущается: <b>{round(d['main']['feels_like'])}°C</b>\n📝 {d['weather'][0]['description'].capitalize()}")
+                await message.answer(text, parse_mode="HTML", reply_markup=main_kb)
             else:
-                await message.answer("Не нашел город.", reply_markup=main_kb)
+                await message.answer("Город не найден.", reply_markup=main_kb)
     await state.clear()
 
 
+# ───── КУРСЫ ─────
 @dp.message(F.text == "💱 Курсы валют")
 async def get_rates(message: Message):
     try:
@@ -214,19 +205,14 @@ async def get_rates(message: Message):
         await message.answer("Ошибка курсов", reply_markup=main_kb)
 
 
-# ───── ЭХО И ЗАПУСК ─────
 @dp.message()
 async def echo(message: Message):
-    await message.answer("Я не понял команду 🤖", reply_markup=main_kb)
-
-
-async def main():
-    print("Бот запущен!")
-    await dp.start_polling(bot)
+    await message.answer("Не понял команду 🤖", reply_markup=main_kb)
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        print("Бот запущен!")
+        asyncio.run(dp.start_polling(bot))
     except KeyboardInterrupt:
         print("Выключено вручную")
