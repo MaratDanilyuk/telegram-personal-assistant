@@ -11,5 +11,5 @@ __pycache__
 *.pyc
 
 # База данных
-bot_database
+bot_database.db
 
