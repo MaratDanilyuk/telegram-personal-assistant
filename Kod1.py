@@ -32,7 +32,6 @@ main_kb = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🌤 Погода"), KeyboardButton(text="💱 Курсы валют")],
     [KeyboardButton(text="⏰ Напомни позже"), KeyboardButton(text="📝 Заметки")]
 ], resize_keyboard=True)
-
 back_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Назад в меню")]], resize_keyboard=True)
 
 
