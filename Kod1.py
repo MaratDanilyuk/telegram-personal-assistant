@@ -21,6 +21,7 @@ bot = Bot(token=TOKEN)
 class Form(StatesGroup):
     waiting_for_reminder = State()
     waiting_for_note = State()
+    waiting_for_note_delete = State()  # Новое состояние для удаления
     waiting_for_city = State()
     waiting_for_ai = State()
     waiting_for_wiki = State()
@@ -32,6 +33,7 @@ main_kb = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🌤 Погода"), KeyboardButton(text="💱 Курсы валют")],
     [KeyboardButton(text="⏰ Напомни позже"), KeyboardButton(text="📝 Заметки")]
 ], resize_keyboard=True)
+
 back_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Назад в меню")]], resize_keyboard=True)
 
 
@@ -85,7 +87,7 @@ async def ai_chat(message: Message):
 # ───── ВИКИПЕДИЯ ─────
 @dp.message(F.text == "🔍 Википедия")
 async def wiki_start(message: Message, state: FSMContext):
-    await message.answer("Введите слово для поиска:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Введи запрос для поиска:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.waiting_for_wiki)
 
 
@@ -98,7 +100,7 @@ async def wiki_search(message: Message, state: FSMContext):
         await message.answer(f"📖 <b>{message.text}</b>\n\n{res}\n\n🔗 <a href='{url}'>Читать статью</a>",
                              parse_mode="HTML", reply_markup=main_kb)
     except Exception:
-        await message.answer("Ничего не найдено или слишком много значений.", reply_markup=main_kb)
+        await message.answer("Ничего не найдено.", reply_markup=main_kb)
     await state.clear()
 
 
@@ -142,14 +144,17 @@ async def remind_parse(message: Message, state: FSMContext):
 # ───── ЗАМЕТКИ ─────
 @dp.message(F.text == "📝 Заметки")
 async def notes_menu(message: Message):
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Добавить заметку"), KeyboardButton(text="Мои заметки")],
-                                       [KeyboardButton(text="Назад в меню")]], resize_keyboard=True)
+    # Обновленная клавиатура с кнопкой Удалить
+    kb = ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Добавить"), KeyboardButton(text="Удалить")],
+        [KeyboardButton(text="Мои заметки"), KeyboardButton(text="Назад в меню")]
+    ], resize_keyboard=True)
     await message.answer("Меню заметок:", reply_markup=kb)
 
 
-@dp.message(F.text == "Добавить заметку")
+@dp.message(F.text == "Добавить")
 async def add_note(message: Message, state: FSMContext):
-    await message.answer("Введите текст заметки:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Введи текст заметки:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.waiting_for_note)
 
 
@@ -167,10 +172,45 @@ async def list_notes(message: Message):
     await message.answer(f"📋 Твои заметки:\n\n{text}", reply_markup=main_kb)
 
 
+@dp.message(F.text == "Удалить")
+async def delete_note_start(message: Message, state: FSMContext):
+    # Сначала показываем список, чтобы юзер знал номер
+    notes = await db_fetch("SELECT text FROM notes WHERE user_id = ?", (message.from_user.id,))
+    if not notes:
+        await message.answer("Удалять нечего, список пуст.", reply_markup=main_kb)
+        return
+    text = "\n".join(f"{i + 1}. {n}" for i, n in enumerate(notes))
+    await message.answer(f"📋 Выбери номер заметки для удаления:\n\n{text}", reply_markup=ReplyKeyboardRemove())
+    await state.set_state(Form.waiting_for_note_delete)
+
+
+@dp.message(Form.waiting_for_note_delete)
+async def delete_note_finish(message: Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("Нужно ввести число!", reply_markup=main_kb)
+        await state.clear()
+        return
+
+    num = int(message.text)
+    # Хитрый SQL: удаляем N-ю запись пользователя
+    # LIMIT 1 OFFSET (N-1) находит нужную строку, а мы берем её ID и удаляем
+    sql = """
+        DELETE FROM notes 
+        WHERE rowid = (
+            SELECT rowid FROM notes 
+            WHERE user_id = ? 
+            LIMIT 1 OFFSET ?
+        )
+    """
+    await db_exec(sql, (message.from_user.id, num - 1))
+    await message.answer("🗑 Заметка удалена (если номер был верный).", reply_markup=main_kb)
+    await state.clear()
+
+
 # ───── ПОГОДА ─────
 @dp.message(F.text == "🌤 Погода")
 async def weather_start(message: Message, state: FSMContext):
-    await message.answer("Введите город:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Введи город:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Form.waiting_for_city)
 
 
@@ -182,7 +222,7 @@ async def get_weather(message: Message, state: FSMContext):
         async with sess.get(url) as resp:
             if resp.status == 200:
                 d = await resp.json()
-                text = (f"🌤 <b>{city}</b>\n🌡 Температура: {round(d['main']['temp'])}°C\n"
+                text = (f"🌤 <b>{city}</b>\n🌡 Темп: {round(d['main']['temp'])}°C\n"
                         f"🥶 Ощущается: <b>{round(d['main']['feels_like'])}°C</b>\n📝 {d['weather'][0]['description'].capitalize()}")
                 await message.answer(text, parse_mode="HTML", reply_markup=main_kb)
             else:
