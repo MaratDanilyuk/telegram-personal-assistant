@@ -62,27 +62,49 @@ async def back_to_main(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Главное меню:", reply_markup=main_kb)
 
+# Словарь для хранения истории диалога: {user_id: [список сообщений]}
+user_context = {}
 
 # ───── НЕЙРОСЕТЬ ─────
 @dp.message(F.text == "🧠 AI Помощник")
 async def ai_start(message: Message, state: FSMContext):
-    await message.answer("🤖 Режим GPT. Спрашивай!\nВыход — кнопка внизу.", reply_markup=back_kb)
+    # При входе очищаем старую историю, чтобы начать диалог с чистого листа
+    user_context[message.from_user.id] = [
+        {"role": "system", "content": "Ты умный ассистент. Отвечай на русском."}
+    ]
+    await message.answer("🤖 Режим GPT. Я помню контекст беседы!\nСпрашивай. Выход — кнопка внизу.",
+                         reply_markup=back_kb)
     await state.set_state(Form.waiting_for_ai)
-
 
 @dp.message(Form.waiting_for_ai)
 async def ai_chat(message: Message):
+    user_id = message.from_user.id
+
+    # Если истории почему-то нет (перезагрузка бота), создаем новую
+    if user_id not in user_context:
+        user_context[user_id] = [{"role": "system", "content": "Ты умный ассистент."}]
+
+    # Добавляем сообщение пользователя в историю
+    user_context[user_id].append({"role": "user", "content": message.text})
     await bot.send_chat_action(message.chat.id, "typing")
+
     try:
         async with aiohttp.ClientSession() as sess:
-            payload = {"messages": [{"role": "system", "content": "Ты умный ассистент. Отвечай на русском."},
-                                    {"role": "user", "content": message.text}], "model": "openai"}
+            # Отправляем ВСЮ историю (user_context), а не только message.text
+            payload = {
+                "messages": user_context[user_id],
+                "model": "openai"
+            }
             async with sess.post("https://text.pollinations.ai/", json=payload) as resp:
-                await message.answer(await resp.text() if resp.status == 200 else "Ошибка сервера.",
-                                     reply_markup=back_kb)
+                if resp.status == 200:
+                    answer = await resp.text()
+                    # Добавляем ответ бота в историю, чтобы он тоже его помнил
+                    user_context[user_id].append({"role": "assistant", "content": answer})
+                    await message.answer(answer, reply_markup=back_kb)
+                else:
+                    await message.answer("Ошибка сервера.", reply_markup=back_kb)
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
-
 
 # ───── ВИКИПЕДИЯ ─────
 @dp.message(F.text == "🔍 Википедия")
