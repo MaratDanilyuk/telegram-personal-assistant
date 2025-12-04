@@ -10,8 +10,5 @@ env
 __pycache__
 *.pyc
 
-# Наши данные (заметки пользователей)
-notes.json
-
-# macOS мусор
-.DS_Store
+# База данных
+bot_database.db
